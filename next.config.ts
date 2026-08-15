@@ -14,6 +14,10 @@ const backendOrigin = process.env.BACKEND_ORIGIN;
 const nextConfig: NextConfig = {
   // Minimal, self-contained runtime for the Docker image — see Dockerfile.
   output: "standalone",
+  // The server sits behind a reverse proxy that already compresses
+  // responses; Next.js's own gzip on top of that double-encodes the body
+  // and browsers fail with ERR_CONTENT_DECODING_FAILED. Let the proxy own it.
+  compress: false,
   async rewrites() {
     if (!backendOrigin) return [];
     return {
