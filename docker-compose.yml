@@ -1,0 +1,22 @@
+services:
+  web:
+    build:
+      context: .
+      args:
+        # NEXT_PUBLIC_* is inlined into the client bundle at build time, and
+        # BACKEND_ORIGIN is baked into the rewrites() manifest at build time too
+        # (see next.config.ts) — both must be build args, not just runtime env.
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-/api}
+        BACKEND_ORIGIN: ${BACKEND_ORIGIN}
+    ports:
+      # Host 27535 is what the server's reverse proxy forwards to; the
+      # container keeps listening on 3000 internally.
+      - "27535:3000"
+    environment:
+      # Re-declared here because src/lib/server/configProxy.ts and
+      # tenantResolve.ts read these from process.env at request time, in
+      # addition to next.config.ts reading BACKEND_ORIGIN at build time.
+      - BACKEND_ORIGIN=${BACKEND_ORIGIN}
+      - BFF_TOKEN=${BFF_TOKEN}
+      - TENANT_SLUG=${TENANT_SLUG}
+    restart: unless-stopped
