@@ -9,6 +9,9 @@ import { getMyProfile, updateMyProfile } from "../api/profile";
 export const LOCALES = [
   { code: "en", label: "English" },
   { code: "uk", label: "Ukrainian" },
+  { code: "pl", label: "Polish" },
+  { code: "de", label: "German" },
+  { code: "ru", label: "Russian" },
 ];
 
 // One blank slot per available content language — the shared shape for any

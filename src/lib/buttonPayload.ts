@@ -10,7 +10,7 @@ export function payloadFromButton(actionType: ButtonActionType, payload: Record<
   const p = payload ?? {};
   return {
     navigateMenu: actionType === "NAVIGATE" ? String(p.menu ?? "") : "",
-    hookHandler: actionType === "HOOK" ? String(p.handler ?? "") : "",
+    hookHandler: actionType === "HOOK" ? String(p.hook ?? "") : "",
     url: actionType === "URL" ? String(p.url ?? "") : "",
   };
 }
@@ -20,7 +20,7 @@ export function buildActionPayload(actionType: ButtonActionType, draft: ActionPa
     case "NAVIGATE":
       return { menu: draft.navigateMenu };
     case "HOOK":
-      return { handler: draft.hookHandler };
+      return { hook: draft.hookHandler };
     case "URL":
       return { url: draft.url };
     case "BACK":

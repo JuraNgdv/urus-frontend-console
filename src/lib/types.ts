@@ -298,6 +298,11 @@ export interface NodeResponse {
   discount_value: string | null;
   discount_type: DiscountType | null;
   is_active: boolean;
+  // Admin-set flag: blocks drill-down past this node in customer browse
+  // (product-browse), independent of whether it actually has children.
+  // See NodeBrowseItem.is_leaf, which is true when a node has no children
+  // *or* is_final is set.
+  is_final: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -312,6 +317,7 @@ export interface NodeCreateRequest {
   price?: string | null;
   discount_value?: string | null;
   discount_type?: DiscountType | null;
+  is_final?: boolean;
 }
 
 export interface NodeUpdateRequest {
@@ -323,6 +329,7 @@ export interface NodeUpdateRequest {
   discount_value?: string | null;
   discount_type?: DiscountType | null;
   is_active?: boolean;
+  is_final?: boolean;
 }
 
 export interface NodeReorderItem {
@@ -556,6 +563,9 @@ export interface ConfigDefinitionResponse {
   default_value: unknown;
   options: string[] | null;
   validation_rules: ConfigValidationRules | null;
+  // Empty string (not null) when the config isn't grouped — the admin UI
+  // buckets those into a fixed "other" tab (see ConfigsEditor's tabOf).
+  group: string;
 }
 
 export interface ConfigEntryResponse {

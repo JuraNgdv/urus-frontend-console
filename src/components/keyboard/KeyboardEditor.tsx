@@ -14,7 +14,7 @@ import { reorder, useDragReorder } from "@/components/ui/useDragReorder";
 import { ApiError } from "@/lib/api/client";
 import { createButton, createRow, deleteButton, deleteRow, getKeyboardFull, updateButton } from "@/lib/api/keyboards";
 import { listMenus } from "@/lib/api/menus";
-import { getTranslationsBatch, putTranslation } from "@/lib/api/i18n";
+import { getTranslationsBatch, getTranslationsForKey, putTranslation } from "@/lib/api/i18n";
 import { buildActionPayload, describeAction, payloadFromButton } from "@/lib/buttonPayload";
 import { permsToText, textToPerms } from "@/lib/permList";
 import type { ButtonActionType, ButtonCreateRequest, ButtonFull, ButtonStyle, ButtonType, ButtonUpdateRequest } from "@/lib/types";
@@ -132,6 +132,28 @@ export function KeyboardEditor({ kbKey }: { kbKey: string }) {
   }
 
   const [modalButton, setModalButton] = useState<DraftButton | null>(null);
+
+  // Opens the edit modal immediately (blank translation fields, as before),
+  // then fills them in once the per-ref locale dict comes back. Guarded by
+  // reference equality against the blank object draftFromButton handed out —
+  // onChange always replaces that reference with a new object, so if the
+  // admin already started typing before the fetch resolved, this leaves
+  // their edits alone instead of clobbering them.
+  async function openEditButton(rowId: string, btn: ButtonFull) {
+    const draft = draftFromButton(rowId, btn, kbKey);
+    const blankTranslations = draft.translations;
+    setModalButton(draft);
+    try {
+      const locales = await getTranslationsForKey(tenantId, `${draft.namespace}.${draft.textKey}`, token!);
+      setModalButton((prev) =>
+        prev && prev.id === btn.id
+          ? { ...prev, translations: prev.translations === blankTranslations ? locales : prev.translations }
+          : prev,
+      );
+    } catch (err) {
+      flash(err instanceof ApiError ? err.message : t("console.keyboards.toast.loadTranslationsFailed"));
+    }
+  }
 
   // No documented move endpoint for keyboard rows (see plan gap #1) — reorder
   // locally only, until a real persistence route exists.
@@ -282,7 +304,7 @@ export function KeyboardEditor({ kbKey }: { kbKey: string }) {
                     <button
                       key={btn.id}
                       type="button"
-                      onClick={() => setModalButton(draftFromButton(row.id, btn, kbKey))}
+                      onClick={() => openEditButton(row.id, btn)}
                       style={{
                         textAlign: "left",
                         background: "transparent",
@@ -344,9 +366,7 @@ export function KeyboardEditor({ kbKey }: { kbKey: string }) {
             </div>
           ))}
         </div>
-        <p className="urus-endpoint-hint">
-          GET /tenants/{"{tenant_id}"}/keyboards/{kb.key}/full
-        </p>
+        
       </aside>
 
       {modalButton && (

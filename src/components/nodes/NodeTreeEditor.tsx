@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { LOCALES, emptyTranslations } from "@/lib/locale/LocaleContext";
@@ -11,7 +11,7 @@ import { LocaleTranslationFields } from "@/components/ui/LocaleTranslationFields
 import { cardStyle, ghostBtn, primaryBtn, smallPrimaryBtn, tabStyle, toggleStyle } from "@/components/ui/styles";
 import { reorder, useDragReorder } from "@/components/ui/useDragReorder";
 import { ApiError } from "@/lib/api/client";
-import { deleteTranslation, getTranslationsBatch, putTranslation } from "@/lib/api/i18n";
+import { deleteTranslation, getTranslationsBatch, getTranslationsForKey, putTranslation } from "@/lib/api/i18n";
 import {
   bulkCreateNodes,
   createNode,
@@ -39,57 +39,51 @@ interface BulkImportResultRow {
   error: string | null;
 }
 
-// Textarea input is an indented outline, not JSON — nesting comes from
-// leading whitespace, exactly like the example the format was designed
-// around:
-//
-//   node Київ
-//     name.en: Kyiv
-//     desc.uk: Столиця України
-//
-//     node Оболонь
-//       price: 20
-//
-// A "node <text>" line starts a node, setting its name for whichever locale
-// is currently active in the toolbar; `key: value` / `key.locale: value`
-// lines below it (until the next "node" line at the same or shallower
-// indent) set its other properties. Blank lines are purely cosmetic.
-function parseBulkImportOutline(text: string, currentLocale: string): BulkImportNode[] {
-  const roots: BulkImportNode[] = [];
-  const stack: { indent: number; node: BulkImportNode }[] = [];
-  const lines = text.split("\n");
+// Bulk import creates exactly one flat level of direct children under
+// whichever node is currently open — no nesting, so the input format can be
+// much simpler than an outline: a "format" (one field per line, e.g.
+// "name.en" or "name.en" + "price") plus a "data" block where each line
+// fills the next field in that format, cycling back to field 1 after a node's
+// last field. E.g. format ["name.en", "price"] over data
+// ["Centrum", "20", "Jozefowiec", "30"] makes two nodes. A blank data line
+// still consumes a slot (an explicitly empty value for that field) rather
+// than being skipped — that's what lets a paste like "Brynów" / "" (no
+// price) line up correctly with the next node's "name.en" rather than
+// shifting every field after it by one. Only a run of fully blank lines at
+// the very end (a trailing-newline paste artifact) is trimmed.
+const BULK_KNOWN_STATIC_FIELDS = new Set(["price", "discount_value", "discount_type", "order_index"]);
 
+function parseBulkImportFormat(formatText: string): string[] {
+  const keys = formatText
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  if (keys.length === 0) throw new Error('Specify at least one field in the format, e.g. "name.en".');
+  for (const key of keys) {
+    if (!key.startsWith("name.") && !key.startsWith("desc.") && !BULK_KNOWN_STATIC_FIELDS.has(key)) {
+      throw new Error(`Unknown field "${key}" in format.`);
+    }
+  }
+  if (!keys.some((k) => k.startsWith("name."))) {
+    throw new Error('Format needs at least one "name.<locale>" field.');
+  }
+  return keys;
+}
+
+function parseBulkImportData(formatKeys: string[], dataText: string): { nodes: BulkImportNode[]; warning: string | null } {
+  const lines = dataText.split("\n");
+  while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+
+  const nodes: BulkImportNode[] = [];
   for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i];
-    if (!raw.trim()) continue;
-    const indent = raw.length - raw.trimStart().length;
-    const content = raw.trim();
+    const slot = i % formatKeys.length;
+    if (slot === 0) nodes.push({ name: {} });
+    const value = lines[i].trim();
+    if (!value) continue;
+
+    const key = formatKeys[slot];
+    const node = nodes[nodes.length - 1];
     const lineNo = i + 1;
-
-    if (content.startsWith("node ") || content === "node") {
-      const name = content.slice(4).trim();
-      if (!name) throw new Error(`Line ${lineNo}: "node" needs a name after it.`);
-      const node: BulkImportNode = { name: { [currentLocale]: name } };
-      while (stack.length > 0 && stack[stack.length - 1].indent >= indent) stack.pop();
-      if (stack.length === 0) roots.push(node);
-      else {
-        const parent = stack[stack.length - 1].node;
-        parent.children = parent.children ?? [];
-        parent.children.push(node);
-      }
-      stack.push({ indent, node });
-      continue;
-    }
-
-    if (stack.length === 0) {
-      throw new Error(`Line ${lineNo}: property line before any "node" line.`);
-    }
-    const node = stack[stack.length - 1].node;
-    const colon = content.indexOf(":");
-    if (colon === -1) throw new Error(`Line ${lineNo}: expected "key: value".`);
-    const key = content.slice(0, colon).trim();
-    const value = content.slice(colon + 1).trim();
-
     if (key.startsWith("name.")) node.name[key.slice(5)] = value;
     else if (key.startsWith("desc.")) node.desc = { ...node.desc, [key.slice(5)]: value };
     else if (key === "price") node.price = value;
@@ -103,78 +97,29 @@ function parseBulkImportOutline(text: string, currentLocale: string): BulkImport
       const n = Number(value);
       if (Number.isNaN(n)) throw new Error(`Line ${lineNo}: order_index must be a number.`);
       node.order_index = n;
-    } else {
-      throw new Error(`Line ${lineNo}: unknown property "${key}".`);
     }
   }
 
-  return roots;
+  const remainder = lines.length % formatKeys.length;
+  const warning =
+    remainder !== 0
+      ? `Last item only has ${remainder} of ${formatKeys.length} fields — check the data lines up with the format.`
+      : null;
+
+  return { nodes, warning };
 }
 
-const BULK_IMPORT_PLACEHOLDER = `node heparine
-  name.en: Heparine💉
-  name.ru: Гепарин💉
-  name.uk: Гепарин💉
-  desc.en: Natural anticoagulant
-  desc.ru: Природный антикоагулянт
-  desc.uk: Природний антикоагулянт
+const BULK_FORMAT_PLACEHOLDER = `name.en
+price`;
 
-  node 20mg
-    name.en: 20mg
-    name.ru: 20мг
-    name.uk: 20мг
-    price: 20
+const BULK_DATA_PLACEHOLDER = `Centrum
+20
+Jozefowiec
+30
+Brynów
 
-  node 100mg
-    name.en: 100mg
-    name.ru: 100мг
-    name.uk: 100мг
-    price: 90
-
-node vitamin_d
-  name.en: Vitamin D💊
-  name.ru: Витамин Д💊
-  name.uk: Вітамін Д💊
-  desc.en: Fat-soluble vitamin
-  desc.ru: Жрорастворимый витамин
-  desc.uk: Жиророзчинний вітамін
-  ...`;
-
-// Real multi-cursor editing isn't something a plain <textarea> can do — no
-// amount of JS gets a second caret; that needs a full code-editor component
-// (CodeMirror/Monaco), which is a much bigger dependency than this admin
-// screen warrants. What a textarea *can* do is block indent/outdent (Tab /
-// Shift+Tab over a selection) and rewriting every selected line at once —
-// together they cover the actual workflow (paste names, select them, indent,
-// stamp a prefix on all of them) without a new editor library.
-function applyToSelectedLines(el: HTMLTextAreaElement, onChange: (v: string) => void, rewrite: (line: string) => string) {
-  const { selectionStart, selectionEnd, value } = el;
-  const lineStart = value.lastIndexOf("\n", selectionStart - 1) + 1;
-  let lineEnd = value.indexOf("\n", selectionEnd);
-  if (lineEnd === -1) lineEnd = value.length;
-
-  const block = value.slice(lineStart, lineEnd);
-  const lines = block.split("\n");
-  const changed = lines.map(rewrite);
-  const nextBlock = changed.join("\n");
-  const next = value.slice(0, lineStart) + nextBlock + value.slice(lineEnd);
-  onChange(next);
-
-  const firstLineDelta = changed[0].length - lines[0].length;
-  const totalDelta = nextBlock.length - block.length;
-  requestAnimationFrame(() => {
-    el.focus();
-    el.selectionStart = Math.max(lineStart, selectionStart + firstLineDelta);
-    el.selectionEnd = selectionEnd + totalDelta;
-  });
-}
-
-function indentLine(line: string, direction: 1 | -1): string {
-  if (direction === 1) return "  " + line;
-  if (line.startsWith("  ")) return line.slice(2);
-  if (line.startsWith(" ")) return line.slice(1);
-  return line;
-}
+Ligota
+`;
 
 interface NodeDraft {
   id: string | null;
@@ -193,11 +138,31 @@ interface NodeDraft {
   discountValue: string;
   discountType: "" | DiscountType;
   isActive: boolean;
+  // Blocks drill-down past this node in customer browse, independent of
+  // whether it actually has children — see NodeResponse.is_final.
+  isFinal: boolean;
+  // What is_final was when the modal opened — lets saveMutation omit is_final
+  // from the PATCH entirely when it's untouched. The backend rejects any
+  // is_final assignment (even a same-value one) on a node that has children,
+  // so editing e.g. just a translation on such a node must not resend it.
+  originalIsFinal: boolean;
 }
 
 function autoDescKey(nameKey: string): string {
   const trimmed = nameKey.trim();
   return trimmed ? `${trimmed.toLowerCase()}_desc` : "";
+}
+
+// No more manually-typed "Name key" field — sent as-is (no client-side
+// slugifying) from whichever name translation is filled in, preferring
+// English (stable even if the English copy later gets tweaked) and falling
+// back to the first other filled-in locale otherwise. The backend slugifies
+// this into the real name_key and returns it on the create response — see
+// saveMutation, which writes translations under that returned key, not this
+// raw one.
+function deriveNameKey(nameTranslations: Record<string, string>): string {
+  const en = nameTranslations.en?.trim();
+  return en || Object.values(nameTranslations).find((v) => v?.trim())?.trim() || "";
 }
 
 // Translation fields start blank even when editing — same convention as MenuEditor's
@@ -217,6 +182,8 @@ function draftFromNode(node: NodeResponse | null, parentId: string | null): Node
       discountValue: "",
       discountType: "",
       isActive: true,
+      isFinal: false,
+      originalIsFinal: false,
     };
   }
   return {
@@ -231,6 +198,8 @@ function draftFromNode(node: NodeResponse | null, parentId: string | null): Node
     discountValue: node.discount_value ?? "",
     discountType: node.discount_type ?? "",
     isActive: node.is_active,
+    isFinal: node.is_final,
+    originalIsFinal: node.is_final,
   };
 }
 
@@ -250,25 +219,44 @@ export function NodeTreeEditor() {
   const [nodeDraft, setNodeDraft] = useState<NodeDraft | null>(null);
   const [levelLabelDraft, setLevelLabelDraft] = useState<Record<string, string> | null>(null);
   const [bulkImportOpen, setBulkImportOpen] = useState(false);
+  const [bulkImportFormat, setBulkImportFormat] = useState("name.en");
   const [bulkImportText, setBulkImportText] = useState("");
+  const [bulkImportIsFinal, setBulkImportIsFinal] = useState(false);
   const [bulkImportResults, setBulkImportResults] = useState<BulkImportResultRow[] | null>(null);
-  const [bulkImportPrefix, setBulkImportPrefix] = useState("name.en: ");
-  const bulkImportRef = useRef<HTMLTextAreaElement | null>(null);
-
-  function handleBulkImportKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key !== "Tab") return;
-    e.preventDefault();
-    applyToSelectedLines(e.currentTarget, setBulkImportText, (line) => indentLine(line, e.shiftKey ? -1 : 1));
-  }
-
-  function prefixSelectedBulkImportLines() {
-    if (!bulkImportRef.current) return;
-    applyToSelectedLines(bulkImportRef.current, setBulkImportText, (line) => (line.trim() ? bulkImportPrefix + line : line));
-  }
 
   function switchType(type: NodeType) {
     setNodeType(type);
     setCurrentParentId(null);
+  }
+
+  // Opens the edit modal immediately (blank translation fields, as before),
+  // then fills them in once the per-key locale dicts come back. Guarded by
+  // reference equality against the blank objects draftFromNode handed out —
+  // onChange always replaces that reference with a new object, so if the
+  // admin already started typing before the fetch resolved, this leaves
+  // their edits alone instead of clobbering them.
+  async function openEditNode(node: NodeResponse) {
+    const draft = draftFromNode(node, currentParentId);
+    const blankNameTranslations = draft.nameTranslations;
+    const blankDescTranslations = draft.descTranslations;
+    setNodeDraft(draft);
+    try {
+      const [nameLocales, descLocales] = await Promise.all([
+        getTranslationsForKey(tenantId, `nodes.${node.name_key}`, token!),
+        node.desc_key ? getTranslationsForKey(tenantId, `nodes.${node.desc_key}`, token!) : Promise.resolve({}),
+      ]);
+      setNodeDraft((prev) =>
+        prev && prev.id === node.id
+          ? {
+              ...prev,
+              nameTranslations: prev.nameTranslations === blankNameTranslations ? nameLocales : prev.nameTranslations,
+              descTranslations: prev.descTranslations === blankDescTranslations ? descLocales : prev.descTranslations,
+            }
+          : prev,
+      );
+    } catch (err) {
+      flash(err instanceof ApiError ? err.message : t("console.locations.toast.loadTranslationsFailed"));
+    }
   }
 
   const childrenQuery = useQuery({
@@ -361,47 +349,78 @@ export function NodeTreeEditor() {
     onError: (err) => flash(err instanceof ApiError ? err.message : t("console.locations.toast.updateNodeFailed")),
   });
 
+  const toggleFinalMutation = useMutation({
+    mutationFn: (node: NodeResponse) => updateNode(tenantId, node.id, { is_final: !node.is_final }, token!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["nodeChildren", tenantId, nodeType, currentParentId] });
+    },
+    onError: (err) => flash(err instanceof ApiError ? err.message : t("console.locations.toast.updateNodeFailed")),
+  });
+
   const saveMutation = useMutation({
     mutationFn: async (draft: NodeDraft) => {
       const price = draft.price.trim() || null;
       const discountValue = draft.discountValue.trim() || null;
       const discountType = draft.discountType || null;
-      const descKey = draft.descKey.trim() || null;
+
+      // On create, name_key is sent raw (unslugified — see deriveNameKey)
+      // and desc_key isn't sent at all; the backend slugifies/derives both
+      // itself and returns the real values on the response. Translations go
+      // under those returned keys, not the client-side draft ones.
+      //
+      // On update, neither is sent at all — this UI has no field to change
+      // either one while editing (both are frozen from the loaded node, see
+      // draftFromNode/openEditNode), so they're always the same value the
+      // node already has. Resending them anyway used to reslugify/regenerate
+      // name_key server-side on every save (same failure mode as is_final:
+      // the backend treats mere presence in the PATCH as "change this", not
+      // "here's its current value") — silently drifting the node's real
+      // name_key away from the one its translations are stored under, e.g.
+      // just bumping the price would orphan every existing translation.
+      let nameKey: string;
+      let descKey: string | null;
 
       if (draft.id) {
+        nameKey = draft.nameKey;
+        descKey = draft.descKey.trim() || null;
         await updateNode(
           tenantId,
           draft.id,
           {
-            name_key: draft.nameKey,
-            desc_key: descKey,
             price,
             discount_value: discountValue,
             discount_type: discountType,
             is_active: draft.isActive,
+            // Only sent when actually toggled — the backend rejects any
+            // is_final assignment (even a same-value no-op) on a node that
+            // has children, so an unrelated edit (e.g. just a translation)
+            // must not resend the untouched value.
+            ...(draft.isFinal !== draft.originalIsFinal ? { is_final: draft.isFinal } : {}),
           },
           token!,
         );
       } else {
-        await createNode(
+        const created = await createNode(
           tenantId,
           nodeType,
           {
             parent_id: draft.parentId,
             name_key: draft.nameKey,
-            desc_key: descKey,
             order_index: children.length,
             price,
             discount_value: discountValue,
             discount_type: discountType,
+            is_final: draft.isFinal,
           },
           token!,
         );
+        nameKey = created.name_key;
+        descKey = created.desc_key;
       }
 
       for (const l of LOCALES) {
         const nameVal = draft.nameTranslations[l.code]?.trim();
-        if (nameVal) await putTranslation(tenantId, "nodes", draft.nameKey, l.code, nameVal, token!);
+        if (nameVal) await putTranslation(tenantId, "nodes", nameKey, l.code, nameVal, token!);
       }
       if (descKey) {
         for (const l of LOCALES) {
@@ -435,7 +454,7 @@ export function NodeTreeEditor() {
   });
 
   const bulkImportMutation = useMutation({
-    mutationFn: async (rootItems: BulkImportNode[]) => {
+    mutationFn: async ({ items: rootItems, isFinal }: { items: BulkImportNode[]; isFinal: boolean }) => {
       interface LevelEntry {
         source: BulkImportNode;
         parentId: string | null;
@@ -465,8 +484,8 @@ export function NodeTreeEditor() {
           if (!r.success || !r.node) continue;
 
           // Bulk create only accepts name/desc/order_index — price/discount
-          // need a follow-up PATCH on the node it just created.
-          if (source.price !== undefined || source.discountValue !== undefined || source.discountType !== undefined) {
+          // and is_final need a follow-up PATCH on the node it just created.
+          if (source.price !== undefined || source.discountValue !== undefined || source.discountType !== undefined || isFinal) {
             try {
               await updateNode(
                 tenantId,
@@ -475,6 +494,7 @@ export function NodeTreeEditor() {
                   price: source.price ?? null,
                   discount_value: source.discountValue ?? null,
                   discount_type: source.discountType ?? null,
+                  ...(isFinal ? { is_final: true } : {}),
                 },
                 token!,
               );
@@ -507,17 +527,43 @@ export function NodeTreeEditor() {
     onError: (err) => flash(err instanceof ApiError ? err.message : t("console.locations.toast.bulkFailed")),
   });
 
-  let bulkImportParsed: BulkImportNode[] | null = null;
+  let bulkImportFormatKeys: string[] | null = null;
   let bulkImportError: string | null = null;
-  if (bulkImportText.trim()) {
+  try {
+    bulkImportFormatKeys = parseBulkImportFormat(bulkImportFormat);
+  } catch (err) {
+    bulkImportError = err instanceof Error ? err.message : t("console.locations.invalidInput");
+  }
+
+  let bulkImportParsed: BulkImportNode[] | null = null;
+  let bulkImportWarning: string | null = null;
+  if (bulkImportFormatKeys && bulkImportText.trim()) {
     try {
-      bulkImportParsed = parseBulkImportOutline(bulkImportText, contentLocale);
+      const result = parseBulkImportData(bulkImportFormatKeys, bulkImportText);
+      bulkImportParsed = result.nodes;
+      bulkImportWarning = result.warning;
     } catch (err) {
       bulkImportError = err instanceof Error ? err.message : t("console.locations.invalidInput");
     }
   }
 
-  const nameKeyValid = !!nodeDraft && nodeDraft.nameKey.trim() !== "" && !/\s/.test(nodeDraft.nameKey);
+  // Compact per-node summary for the real-time bulk import preview — lets the
+  // admin confirm the format/data pairing lined up correctly before submitting.
+  function bulkNodePreviewLabel(node: BulkImportNode): string {
+    const name = node.name.en ?? node.name.uk ?? Object.values(node.name).find((v) => v?.trim()) ?? t("console.locations.unnamed");
+    const extras: string[] = [];
+    if (node.price) extras.push(`price ${node.price}`);
+    if (node.discountValue) extras.push(`-${node.discountValue}${node.discountType === "percent" ? "%" : ""}`);
+    if (node.desc && Object.values(node.desc).some((v) => v?.trim())) extras.push("desc");
+    return extras.length ? `${name} · ${extras.join(" · ")}` : name;
+  }
+
+  const hasAnyNameTranslation = !!nodeDraft && Object.values(nodeDraft.nameTranslations).some((v) => v?.trim());
+  // Editing an existing node keeps its already-derived key regardless of
+  // whether any translation field is (re)filled in this session — see
+  // draftFromNode. A new node has no key yet, so at least one translation
+  // must be filled in to derive one from (see deriveNameKey).
+  const nameKeyValid = !!nodeDraft && (nodeDraft.id ? nodeDraft.nameKey.trim() !== "" : hasAnyNameTranslation);
 
   return (
     <main className="urus-list-screen">
@@ -569,6 +615,7 @@ export function NodeTreeEditor() {
               onClick={() => {
                 setBulkImportText("");
                 setBulkImportResults(null);
+                setBulkImportIsFinal(false);
                 setBulkImportOpen(true);
               }}
             >
@@ -616,13 +663,13 @@ export function NodeTreeEditor() {
                 <div key={node.id} {...dragProps} style={cardStyle(dragging)}>
                   <div className="urus-card-head">
                     <span className="urus-card-index">☰ {i}</span>
-                    <span className="urus-card-ref">{name}</span>
+                    <span>{name}</span>
                     <span className="urus-perm-key">{node.name_key}</span>
                     <div style={{ flex: 1 }} />
                     <button type="button" style={ghostBtn()} onClick={() => setCurrentParentId(node.id)}>
                       {t("console.locations.open")}
                     </button>
-                    <button type="button" style={ghostBtn()} onClick={() => setNodeDraft(draftFromNode(node, currentParentId))}>
+                    <button type="button" style={ghostBtn()} onClick={() => openEditNode(node)}>
                       {t("console.common.edit")}
                     </button>
                     <button type="button" style={ghostBtn()} onClick={() => deleteMutation.mutate(node)}>
@@ -636,6 +683,13 @@ export function NodeTreeEditor() {
                       onClick={() => toggleActiveMutation.mutate(node)}
                     >
                       {node.is_active ? t("console.locations.active") : t("console.locations.inactive")}
+                    </button>
+                    <button
+                      type="button"
+                      style={toggleStyle(node.is_final)}
+                      onClick={() => toggleFinalMutation.mutate(node)}
+                    >
+                      {node.is_final ? t("console.locations.final") : t("console.locations.notFinal")}
                     </button>
                     {node.price && <span className="urus-tag-outline-soft">{node.price}</span>}
                     {node.discount_value && (
@@ -678,34 +732,28 @@ export function NodeTreeEditor() {
             </>
           }
         >
-          <label className="urus-field">
-            <span className="urus-field-label">{t("console.locations.fieldNameKey")}</span>
-            <input
-              className="urus-input urus-input-mono"
-              value={nodeDraft.nameKey}
-              onChange={(e) => {
-                const nameKey = e.target.value;
-                setNodeDraft({
-                  ...nodeDraft,
-                  nameKey,
-                  descKey: nodeDraft.descKeyAuto ? autoDescKey(nameKey) : nodeDraft.descKey,
-                });
-              }}
-              placeholder={t("console.locations.nameKeyPlaceholder")}
-            />
-            {!nameKeyValid && nodeDraft.nameKey && (
-              <span className="urus-field-hint">{t("console.locations.noSpaces")}</span>
-            )}
-          </label>
           <div className="urus-field">
             <span className="urus-field-label">{t("console.locations.fieldNameTranslations")}</span>
             <LocaleTranslationFields
               values={nodeDraft.nameTranslations}
-              onChange={(code, value) =>
-                setNodeDraft({ ...nodeDraft, nameTranslations: { ...nodeDraft.nameTranslations, [code]: value } })
-              }
+              onChange={(code, value) => {
+                const nameTranslations = { ...nodeDraft.nameTranslations, [code]: value };
+                const nameKey = nodeDraft.id ? nodeDraft.nameKey : deriveNameKey(nameTranslations);
+                setNodeDraft({
+                  ...nodeDraft,
+                  nameTranslations,
+                  nameKey,
+                  descKey: nodeDraft.descKeyAuto ? autoDescKey(nameKey) : nodeDraft.descKey,
+                });
+              }}
             />
-            <span className="urus-field-hint">{t("console.common.translationHintEditable")}</span>
+            <span className="urus-field-hint">
+              {nodeDraft.id
+                ? t("console.common.translationHintEditable")
+                : hasAnyNameTranslation
+                  ? t("console.locations.nameKeyHint", { key: nodeDraft.nameKey })
+                  : t("console.locations.nameTranslationRequired")}
+            </span>
           </div>
           <div className="urus-field">
             <span className="urus-field-label">{t("console.locations.fieldDescTranslations")}</span>
@@ -768,6 +816,17 @@ export function NodeTreeEditor() {
               </span>
             </label>
           )}
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={nodeDraft.isFinal}
+              onChange={(e) => setNodeDraft({ ...nodeDraft, isFinal: e.target.checked })}
+            />
+            <span className="urus-field-label" style={{ marginBottom: 0 }}>
+              {t("console.locations.fieldIsFinal")}
+            </span>
+          </label>
+          <span className="urus-field-hint">{t("console.locations.isFinalHint")}</span>
         </Modal>
       )}
 
@@ -814,7 +873,9 @@ export function NodeTreeEditor() {
                 type="button"
                 style={primaryBtn()}
                 disabled={!bulkImportParsed || bulkImportParsed.length === 0 || bulkImportMutation.isPending}
-                onClick={() => bulkImportParsed && bulkImportMutation.mutate(bulkImportParsed)}
+                onClick={() =>
+                  bulkImportParsed && bulkImportMutation.mutate({ items: bulkImportParsed, isFinal: bulkImportIsFinal })
+                }
               >
                 {bulkImportMutation.isPending ? t("console.locations.importing") : t("console.locations.importAction")}
               </button>
@@ -833,33 +894,54 @@ export function NodeTreeEditor() {
                   type: nodeType === "location" ? t("console.locations.tabLocations") : t("console.locations.tabCategories"),
                 })}
           </p>
+          <p className="urus-field-hint">{t("console.locations.bulkFlatHint")}</p>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: "var(--space-3)" }}>
+            <input type="checkbox" checked={bulkImportIsFinal} onChange={(e) => setBulkImportIsFinal(e.target.checked)} />
+            <span className="urus-field-label" style={{ marginBottom: 0 }}>
+              {t("console.locations.bulkMarkAllFinal")}
+            </span>
+          </label>
           <label className="urus-field">
-            <span className="urus-field-label">{t("console.locations.fieldOutline")}</span>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
-              <input
-                className="urus-input urus-input-mono"
-                style={{ flex: 1 }}
-                value={bulkImportPrefix}
-                onChange={(e) => setBulkImportPrefix(e.target.value)}
-                placeholder={t("console.locations.prefixPlaceholder")}
-              />
-              <button type="button" style={ghostBtn()} onClick={prefixSelectedBulkImportLines}>
-                {t("console.locations.prefixButton")}
-              </button>
-            </div>
+            <span className="urus-field-label">{t("console.locations.fieldBulkFormat")}</span>
             <textarea
-              ref={bulkImportRef}
+              className="urus-input urus-input-mono"
+              rows={3}
+              value={bulkImportFormat}
+              onChange={(e) => setBulkImportFormat(e.target.value)}
+              placeholder={BULK_FORMAT_PLACEHOLDER}
+            />
+            <span className="urus-field-hint">{t("console.locations.bulkFormatHint")}</span>
+          </label>
+          <label className="urus-field">
+            <span className="urus-field-label">{t("console.locations.fieldBulkData")}</span>
+            <textarea
               className="urus-input urus-input-mono"
               rows={14}
               value={bulkImportText}
               onChange={(e) => setBulkImportText(e.target.value)}
-              onKeyDown={handleBulkImportKeyDown}
-              placeholder={BULK_IMPORT_PLACEHOLDER}
+              placeholder={BULK_DATA_PLACEHOLDER}
             />
-            <span className="urus-field-hint">{t("console.locations.outlineHint1")}</span>
-            <span className="urus-field-hint">{t("console.locations.outlineHint2", { locale: contentLocale })}</span>
+            <span className="urus-field-hint">{t("console.locations.bulkDataHint")}</span>
             {bulkImportError && <span className="urus-field-hint">{bulkImportError}</span>}
+            {bulkImportWarning && <span className="urus-field-hint">{bulkImportWarning}</span>}
           </label>
+
+          {bulkImportParsed && bulkImportParsed.length > 0 && (
+            <div className="urus-field">
+              <span className="urus-field-label">
+                {t("console.locations.bulkNodesDetected", { count: bulkImportParsed.length })}
+              </span>
+              <div className="urus-card-list">
+                {bulkImportParsed.map((n, i) => (
+                  <div key={i} className="urus-card-tags" style={{ padding: "4px 0" }}>
+                    <span className="urus-tag-outline-soft">
+                      {i + 1}. {bulkNodePreviewLabel(n)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {bulkImportResults && (
             <div className="urus-card-list">

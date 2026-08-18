@@ -95,7 +95,7 @@ export default function AppearancePage() {
                 placeholder={t("console.appearance.imageUrlPlaceholder")}
                 spellCheck={false}
               />
-              <span className="urus-field-hint">{t("console.appearance.imageUrlHint")}</span>
+              
             </label>
             <label className="urus-field" style={{ marginTop: "var(--space-3)" }}>
               <span className="urus-field-label">{t("console.appearance.overlayLabel", { overlay: theme.overlay })}</span>
@@ -179,7 +179,7 @@ export default function AppearancePage() {
             </div>
           </div>
         </div>
-        <p className="urus-endpoint-hint">PUT /tenants/{"{tenant_id}"}/configs/appearance (not documented — stub)</p>
+        
       </aside>
     </main>
   );

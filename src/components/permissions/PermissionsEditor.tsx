@@ -246,7 +246,7 @@ export function PermissionsEditor() {
                 {perms.map((p) => (
                   <div key={p.id} className="urus-card-tags" style={{ padding: "6px 0" }}>
                     <span className="urus-perm-key">{p.key}</span>
-                    {p.description_id && <span className="urus-tag-outline-soft">{describePermission(p.description_id)}</span>}
+                    
                     {p.created_by === null && <span className="urus-tag-dashed">{t("console.permissions.system")}</span>}
                     {canDeletePermission && p.created_by !== null && (
                       <button type="button" style={ghostBtn()} onClick={() => deletePermissionMutation.mutate(p.id)}>

@@ -79,7 +79,7 @@ export function ListScreen({ kind }: { kind: "menus" | "keyboards" }) {
           </Link>
         ))}
       </div>
-      <p className="urus-endpoint-hint">GET /tenants/{"{tenant_id}"}/{kind}</p>
+      
     </main>
   );
 }

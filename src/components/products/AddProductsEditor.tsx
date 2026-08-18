@@ -11,6 +11,7 @@ import { reorder, useDragReorder } from "@/components/ui/useDragReorder";
 import { ApiError } from "@/lib/api/client";
 import { getTranslationsBatch } from "@/lib/api/i18n";
 import { mediaUrl, uploadMedia } from "@/lib/api/media";
+import { getNodePath } from "@/lib/api/nodes";
 import { bulkCreateProducts } from "@/lib/api/products";
 import { NodePicker } from "./NodePicker";
 import type { MediaResponse, NodeResponse, ProductBulkResult, ProductCreateRequest } from "@/lib/types";
@@ -47,6 +48,7 @@ function ProductDraftCard({
   const flash = useToast();
   const t = useSystemT();
   const [uploading, setUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const applyReorder = useDragReorder((from, to) => onChange({ ...draft, media: reorder(draft.media, from, to) }));
 
   async function handleFiles(files: FileList | null) {
@@ -110,34 +112,58 @@ function ProductDraftCard({
 
       <div className="urus-field">
         <span className="urus-field-label">{t("console.products.fieldMedia")}</span>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {draft.media.map((m, i) => {
-            const { dragging, ...dragProps } = applyReorder(i);
-            return (
-              <div key={m.id} {...dragProps} style={{ ...cardStyle(dragging), padding: 4, width: 88 }}>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={mediaUrl(m)} alt="" style={{ width: "100%", height: 64, objectFit: "cover", display: "block" }} />
-                <button
-                  type="button"
-                  style={{ ...ghostBtn(), width: "100%", marginTop: 4 }}
-                  onClick={() => onChange({ ...draft, media: draft.media.filter((x) => x.id !== m.id) })}
-                >
-                  {t("console.common.remove")}
-                </button>
-              </div>
-            );
-          })}
-        </div>
-        <input
-          type="file"
-          accept="image/*,video/*"
-          multiple
-          disabled={uploading}
-          onChange={(e) => {
-            void handleFiles(e.target.files);
-            e.target.value = "";
+        <div
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragOver(true);
           }}
-        />
+          onDragLeave={() => setDragOver(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragOver(false);
+            void handleFiles(e.dataTransfer.files);
+          }}
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+            padding: 8,
+            border: `2px dashed ${dragOver ? "var(--t-accent, #ec3013)" : "var(--t-line-soft, rgba(32,30,29,0.18))"}`,
+            borderRadius: 6,
+          }}
+        >
+          {draft.media.length > 0 && (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {draft.media.map((m, i) => {
+                const { dragging, ...dragProps } = applyReorder(i);
+                return (
+                  <div key={m.id} {...dragProps} style={{ ...cardStyle(dragging), padding: 4, width: 88 }}>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={mediaUrl(m)} alt="" style={{ width: "100%", height: 64, objectFit: "cover", display: "block" }} />
+                    <button
+                      type="button"
+                      style={{ ...ghostBtn(), width: "100%", marginTop: 4 }}
+                      onClick={() => onChange({ ...draft, media: draft.media.filter((x) => x.id !== m.id) })}
+                    >
+                      {t("console.common.remove")}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <input
+            type="file"
+            accept="image/*,video/*"
+            multiple
+            disabled={uploading}
+            onChange={(e) => {
+              void handleFiles(e.target.files);
+              e.target.value = "";
+            }}
+          />
+          <span className="urus-field-hint">{t("console.products.mediaDropHint")}</span>
+        </div>
         {uploading && <span className="urus-field-hint">{t("console.products.uploading")}</span>}
         {draft.media.length === 0 && <span className="urus-field-hint">{t("console.products.mediaRequired")}</span>}
       </div>
@@ -158,9 +184,24 @@ export function AddProductsEditor() {
   const [products, setProducts] = useState<ProductDraft[]>(() => [emptyProductDraft()]);
   const [lastResult, setLastResult] = useState<ProductBulkResult | null>(null);
 
-  const selectedRefs = [selectedLocation, selectedCategory]
-    .filter((n): n is NodeResponse => !!n)
-    .map((n) => `nodes.${n.name_key}`);
+  // Root-to-leaf chain for each selection, not just the leaf itself — shown
+  // as a breadcrumb so the admin can see which branch they're actually
+  // attaching to (a name_key alone doesn't disambiguate same-named leaves
+  // under different parents).
+  const locationPathQuery = useQuery({
+    queryKey: ["productSelectedLocationPath", tenantId, selectedLocation?.id],
+    queryFn: () => getNodePath(tenantId, selectedLocation!.id, token!),
+    enabled: !!token && !!tenantId && !!selectedLocation,
+  });
+  const categoryPathQuery = useQuery({
+    queryKey: ["productSelectedCategoryPath", tenantId, selectedCategory?.id],
+    queryFn: () => getNodePath(tenantId, selectedCategory!.id, token!),
+    enabled: !!token && !!tenantId && !!selectedCategory,
+  });
+  const locationPath = locationPathQuery.data ?? (selectedLocation ? [selectedLocation] : []);
+  const categoryPath = categoryPathQuery.data ?? (selectedCategory ? [selectedCategory] : []);
+
+  const selectedRefs = [...locationPath, ...categoryPath].map((n) => `nodes.${n.name_key}`);
   const selectedNamesQuery = useQuery({
     queryKey: ["productSelectedNodeNames", tenantId, locale, selectedRefs],
     queryFn: () => getTranslationsBatch(tenantId, locale, selectedRefs, token!),
@@ -168,6 +209,9 @@ export function AddProductsEditor() {
   });
   function selectedName(node: NodeResponse): string {
     return selectedNamesQuery.data?.translations[`nodes.${node.name_key}`] || node.name_key;
+  }
+  function selectedBranch(path: NodeResponse[]): string {
+    return path.map(selectedName).join(" → ");
   }
 
   function updateProduct(key: string, next: ProductDraft) {
@@ -231,7 +275,7 @@ export function AddProductsEditor() {
               </div>
               {selectedLocation ? (
                 <div className="urus-card-tags">
-                  <span className="urus-tag-outline-soft">{selectedName(selectedLocation)}</span>
+                  <span className="urus-tag-outline-soft">{selectedBranch(locationPath)}</span>
                   <button type="button" style={ghostBtn()} onClick={() => setSelectedLocation(null)}>
                     {t("console.productsAdd.change")}
                   </button>
@@ -247,7 +291,7 @@ export function AddProductsEditor() {
               </div>
               {selectedCategory ? (
                 <div className="urus-card-tags">
-                  <span className="urus-tag-outline-soft">{selectedName(selectedCategory)}</span>
+                  <span className="urus-tag-outline-soft">{selectedBranch(categoryPath)}</span>
                   <button type="button" style={ghostBtn()} onClick={() => setSelectedCategory(null)}>
                     {t("console.productsAdd.change")}
                   </button>

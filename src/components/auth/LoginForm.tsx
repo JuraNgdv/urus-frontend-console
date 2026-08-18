@@ -69,7 +69,7 @@ export function LoginForm({ tenantSlug }: { tenantSlug: string }) {
       <button type="button" style={primaryBtn()} disabled={submitting} onClick={handleSubmit}>
         {submitting ? "…" : "Sign in"}
       </button>
-      <p className="urus-endpoint-hint">POST /auth/{tenantSlug}/login</p>
+      
       <p className="urus-field-hint">Sign-in via Telegram bot is coming soon.</p>
     </div>
   );

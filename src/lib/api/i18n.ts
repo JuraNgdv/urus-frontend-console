@@ -23,6 +23,18 @@ export function getSystemTranslationsBatch(locale: string, keys: string[]) {
   });
 }
 
+// GET /tenants/{tenant_id}/i18n/locales?key=<namespace>.<key> — every
+// locale's value for one translation ref in a single request (the mirror
+// image of getTranslationsBatch: many refs but one locale there, one ref but
+// every locale here). Used to prefill an existing item's translation inputs
+// when editing — see NodeTreeEditor.
+export function getTranslationsForKey(tenantId: string, key: string, token: string) {
+  return apiFetch<Record<string, string>>(`/tenants/${tenantId}/i18n/locales`, {
+    token,
+    query: { key },
+  });
+}
+
 export function putTranslation(
   tenantId: string,
   namespace: string,

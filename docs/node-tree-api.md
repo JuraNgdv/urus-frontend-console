@@ -16,6 +16,7 @@
 - `order_index` — порядок відображення серед сестринських нод
 - `price`, `discount_value`, `discount_type` — ціноутворення на рівні ноди (необов'язково)
 - `is_active` — чи видима нода клієнтам у browse
+- `is_final` — адмін явно блокує drill-down у browse нижче цієї ноди, навіть якщо в неї згодом з'являться діти. В `product-browse` це відображається як `NodeBrowseItem.is_final`; `is_leaf` там true, якщо нема дітей **або** `is_final`
 
 ### Обмеження дерева
 
@@ -67,6 +68,7 @@
   "discount_value": "decimal | null",
   "discount_type": "percent | fixed | null",
   "is_active": true,
+  "is_final": false,
   "created_at": "datetime",
   "updated_at": "datetime"
 }
@@ -92,7 +94,8 @@
   "order_index": 0,
   "price": "decimal | null",
   "discount_value": "decimal | null",
-  "discount_type": "percent | fixed | null"
+  "discount_type": "percent | fixed | null",
+  "is_final": "bool (default false)"
 }
 ```
 
@@ -163,7 +166,8 @@
   "price": "decimal | null",
   "discount_value": "decimal | null",
   "discount_type": "percent | fixed | null",
-  "is_active": "bool | null"
+  "is_active": "bool | null",
+  "is_final": "bool | null"
 }
 ```
 

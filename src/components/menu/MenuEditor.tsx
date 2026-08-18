@@ -14,7 +14,7 @@ import { reorder, useDragReorder } from "@/components/ui/useDragReorder";
 import { ApiError } from "@/lib/api/client";
 import { createBlock, deleteBlock, getMenuFull, moveBlock, updateBlock } from "@/lib/api/menus";
 import { getKeyboardFull, listKeyboards } from "@/lib/api/keyboards";
-import { getTranslationsBatch, putTranslation, splitRefIntoNamespaceKey } from "@/lib/api/i18n";
+import { getTranslationsBatch, getTranslationsForKey, putTranslation, splitRefIntoNamespaceKey } from "@/lib/api/i18n";
 import { buildBlockContent, generateBlockRef, getBlockRef } from "@/lib/blockContent";
 import { conditionToText, textToCondition } from "@/lib/condition";
 import { permsToText, textToPerms } from "@/lib/permList";
@@ -191,6 +191,29 @@ export function MenuEditor({ menuKey }: { menuKey: string }) {
   const [modalBlock, setModalBlock] = useState<DraftBlock | null>(null);
   const [richGroup, setRichGroup] = useState<BlockFull[] | null | undefined>(undefined);
 
+  // Opens the edit modal immediately (blank translation fields, as before),
+  // then fills them in once the per-ref locale dict comes back. Guarded by
+  // reference equality against the blank object draftFromBlock handed out —
+  // onChange always replaces that reference with a new object, so if the
+  // admin already started typing before the fetch resolved, this leaves
+  // their edits alone instead of clobbering them.
+  async function openEditBlock(block: BlockFull) {
+    const draft = draftFromBlock(block, menuKey);
+    const blankTranslations = draft.translations;
+    setModalBlock(draft);
+    if (!draft.ref) return;
+    try {
+      const locales = await getTranslationsForKey(tenantId, draft.ref, token!);
+      setModalBlock((prev) =>
+        prev && prev.id === block.id
+          ? { ...prev, translations: prev.translations === blankTranslations ? locales : prev.translations }
+          : prev,
+      );
+    } catch (err) {
+      flash(err instanceof ApiError ? err.message : t("console.menus.toast.loadTranslationsFailed"));
+    }
+  }
+
   const moveMutation = useMutation({
     mutationFn: async ({ blockIds, startIndex }: { blockIds: string[]; startIndex: number }) => {
       for (let i = 0; i < blockIds.length; i++) {
@@ -360,9 +383,8 @@ export function MenuEditor({ menuKey }: { menuKey: string }) {
                 <div className="urus-card-head">
                   <span className="urus-card-index">☰ {i}</span>
                   <span className="urus-card-type">{block.type}</span>
-                  {ref && <span className="urus-card-ref">{ref}</span>}
                   <div style={{ flex: 1 }} />
-                  <button type="button" style={ghostBtn()} onClick={() => setModalBlock(draftFromBlock(block, menuKey))}>
+                  <button type="button" style={ghostBtn()} onClick={() => openEditBlock(block)}>
                     {t("console.common.edit")}
                   </button>
                   <button type="button" style={ghostBtn()} onClick={() => deleteMutation.mutate(block.id)}>
@@ -444,9 +466,7 @@ export function MenuEditor({ menuKey }: { menuKey: string }) {
             );
           })}
         </div>
-        <p className="urus-endpoint-hint">
-          GET /tenants/{"{tenant_id}"}/menus/{menu.key}/full
-        </p>
+        
       </aside>
 
       {modalBlock && (

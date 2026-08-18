@@ -8,18 +8,21 @@ import { getTranslationsBatch } from "@/lib/api/i18n";
 import { listNodeChildren } from "@/lib/api/nodes";
 import type { NodeResponse, NodeType } from "@/lib/types";
 
-// A leaf is confirmed once a node's children list comes back empty — there's
-// no `is_leaf` flag on NodeResponse, so that's the only reliable signal.
-// Rendered as one cascading dropdown per depth (root, then that choice's
-// children, and so on) rather than a breadcrumb + card list — much more
-// compact, which matters when this sits inside an already-crowded filter panel.
+// A node is only valid to attach a product to once an admin has explicitly
+// marked it `is_final` in the node tree editor — that's the deliberate
+// "stop here" signal (see NodeResponse.is_final), not just "happens to have
+// no children yet" (a childless-but-not-final node can still grow children
+// later, so it isn't a safe attachment point). Rendered as one cascading
+// dropdown per depth (root, then that choice's children, and so on) rather
+// than a breadcrumb + card list — much more compact, which matters when this
+// sits inside an already-crowded filter panel.
 //
 // Two interaction modes, picked via `requireLeaf`:
 //  - true (default, used by AddProductsEditor): a product can only attach to
-//    a leaf, so `onSelect` fires exactly once, only once a true leaf is chosen.
-//  - false (used by ProductsEditor's filters): any node — leaf or ancestor —
-//    is a valid filter value and nothing needs confirming, so `onChange`
-//    fires on every selection (and on Clear) with whatever's currently picked.
+//    a final node, so `onSelect` fires exactly once, only once one is chosen.
+//  - false (used by ProductsEditor's filters): any node — final or not — is
+//    a valid filter value and nothing needs confirming, so `onChange` fires
+//    on every selection (and on Clear) with whatever's currently picked.
 export function NodePicker({
   nodeType,
   tenantId,
@@ -68,6 +71,10 @@ export function NodePicker({
   const deepestDepth = path.length;
   const deepestQuery = levelQueries[deepestDepth];
   const deepestChildren = levels[deepestDepth] ?? [];
+  const deepestNode = path[path.length - 1] ?? null;
+  const deepestIsFinal = !!deepestNode?.is_final;
+  const deepestIsDeadEnd =
+    requireLeaf && !!deepestNode && !deepestIsFinal && !deepestQuery?.isLoading && deepestChildren.length === 0;
 
   function choose(depth: number, node: NodeResponse) {
     setPath([...path.slice(0, depth), node]);
@@ -79,19 +86,21 @@ export function NodePicker({
     if (!requireLeaf) onChange?.(null);
   }
 
-  // requireLeaf mode only: once the deepest chosen node's children come back
-  // empty, it's a confirmed leaf — hand it up automatically.
+  // requireLeaf mode only: is_final is a property of the chosen node itself,
+  // not something that needs its children fetched first — no need to wait
+  // on deepestQuery here the way a "children came back empty" check would.
   useEffect(() => {
     if (!requireLeaf) return;
-    if (path.length === 0) return;
-    if (!deepestQuery || deepestQuery.isLoading) return;
-    if (deepestChildren.length === 0) onSelect?.(path[path.length - 1]);
+    if (deepestNode?.is_final) onSelect?.(deepestNode);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [requireLeaf, path, deepestQuery?.isLoading, deepestChildren.length]);
+  }, [requireLeaf, deepestNode]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       {levels.map((options, depth) => {
+        // Once the deepest chosen node is final, stop drilling into it even
+        // if it happens to have children — is_final means "attach here."
+        if (deepestIsFinal && depth === path.length) return null;
         if (options.length === 0) return null;
         return (
           <select
@@ -129,6 +138,7 @@ export function NodePicker({
           {nodeType === "location" ? t("console.products.noLocationsYet") : t("console.products.noCategoriesYet")}
         </p>
       )}
+      {deepestIsDeadEnd && <p className="urus-lede">{t("console.products.notFinalYet")}</p>}
     </div>
   );
 }
